@@ -1,0 +1,18 @@
+[package]
+authors = ["Erik Johnston"]
+name = "rust-sync-sercer"
+version = "0.1.0"
+
+[dependencies]
+hyper = "0.9.10"
+postgres = "0.11.10"
+quick-error = "1.1.0"
+scoped-pool = "1.0.0"
+serde = "0.8.4"
+serde_json = "0.8.1"
+serde_macros = "0.8.4"
+
+[dependencies.indolentjson]
+git = "https://github.com/erikjohnston/indolentjson-rust.git"
+branch = "erikj/node"
+optional = false
