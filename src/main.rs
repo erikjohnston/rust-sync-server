@@ -8,6 +8,7 @@ extern crate postgres;
 #[macro_use]
 extern crate quick_error;
 extern crate indolentjson;
+extern crate time;
 
 use indolentjson::nodes::Value as IndolentValue;
 
@@ -178,20 +179,6 @@ fn get_current_receipts_token<T: GenericConnection>(conn: &mut T) -> Result<i64,
 }
 
 
-fn get_event_json<T: GenericConnection>(
-    conn: &mut T, event_id: &str
-) -> Result<Option<Event>, DatabaseError> {
-    let sql = r#"SELECT json FROM event_json WHERE event_id = $1 LIMIT 1"#;
-
-    let event = conn.query(sql, &[&event_id])?
-                    .iter()
-                    .map(|row| row.get(0))
-                    .map(|bytes: String| serde_json::from_str(&bytes).unwrap())
-                    .next();
-
-    Ok(event)
-}
-
 use std::borrow::Borrow;
 
 fn get_event_jsons<T: GenericConnection, S: ToSql + Ord> (
@@ -199,13 +186,26 @@ fn get_event_jsons<T: GenericConnection, S: ToSql + Ord> (
 ) -> Result<Vec<Event>, DatabaseError>
     where String: Borrow<S>
 {
-    let sql = r#"SELECT json FROM event_json WHERE event_id = any($1)"#;
+    let sql = r#"SELECT event_id, json FROM event_json WHERE event_id = any($1)"#;
 
     let mut event_map: BTreeMap<String, Event> = conn.query(sql, &[&event_ids])?
                     .iter()
-                    .map(|row| row.get(0))
-                    .map(|bytes: String| serde_json::from_str(&bytes).unwrap())
-                    .map(|e: Event| (e.event_id.clone(), e))
+                    .map(|row| (row.get(0), row.get(1)))
+                    .map(|(e_id, bytes): (String, String)| {
+                        let mut value = IndolentValue::from_slice(&bytes.as_bytes());
+                        value.discard_key(b"auth_events");
+                        value.discard_key(b"depth");
+                        value.discard_key(b"hashes");
+                        value.discard_key(b"origin");
+                        value.discard_key(b"prev_events");
+                        value.discard_key(b"prev_state");
+                        value.discard_key(b"signatures");
+                        Event {
+                            event_id: e_id,
+                            value: value,
+                        }
+                    })
+                    .map(|e| (e.event_id.clone(), e))
                     .collect();
 
     Ok(event_ids.iter().filter_map(|e_id| event_map.remove(&e_id)).collect())
@@ -421,26 +421,14 @@ fn generate_sync_response<T: GenericConnection>(
         let prev_batch = format!("s{}_0_0_{}_0_0", prev_id, current_receipts);
 
         let mut batch = TimelineBatch {
-            events: get_event_jsons(conn, &event_ids)?.into_iter().filter(|e| {
-                if let Some(ref type_list) = filter.room.timeline.types {
-                    type_list.contains(&e.etype)
-                } else {
-                    true
-                }
-            }).take(filter.room.timeline.limit as usize).collect(),
+            events: get_event_jsons(conn, &event_ids)?,
             prev_batch: prev_batch,
             limited: limited,
         };
         batch.events.reverse();
 
         let state = StateBatch {
-            events: get_event_jsons(conn, &state_delta)?.into_iter().filter(|e| {
-                if let Some(ref type_list) = filter.room.state.types {
-                    type_list.contains(&e.etype)
-                } else {
-                    true
-                }
-            }).collect()
+            events: get_event_jsons(conn, &state_delta)?,
         };
 
         let receipt = get_receipts_for_room(conn, room_id, current_receipts)?;
@@ -489,6 +477,84 @@ use hyper::status::StatusCode;
 use hyper::header::ContentType;
 use std::io;
 
+fn write_sync_response<W: io::Write>(writer: &mut W, sync: SyncResponse) -> serde_json::Result<()> {
+    writer.write_all(b"{")?;
+
+    write!(writer, r#""next_batch":"{}","#, &sync.next_batch)?;
+
+    writer.write_all(br#""account_data":{},"#)?;
+
+    writer.write_all(br#""presence":"#)?;
+    serde_json::to_writer(writer, &sync.presence)?;
+    writer.write_all(b",")?;
+
+    writer.write_all(br#""rooms":{"#)?;
+
+    writer.write_all(br#""invite":{},"#)?;
+    writer.write_all(br#""leave":{},"#)?;
+
+    writer.write_all(br#""join":{"#)?;
+
+    let mut is_first = true;
+    for (room_id, joined) in sync.rooms.join {
+        if is_first {
+            write!(writer, r#""{}":{{"#, &room_id)?;
+            is_first = false;
+        } else {
+            write!(writer, r#","{}":{{"#, &room_id)?;
+        }
+
+        writer.write_all(br#""account_data":"#)?;
+        serde_json::to_writer(writer, &joined.account_data)?;
+        writer.write_all(b",")?;
+
+        writer.write_all(br#""ephemeral":"#)?;
+        serde_json::to_writer(writer, &joined.ephemeral)?;
+        writer.write_all(b",")?;
+
+        writer.write_all(br#""unread_notifications":"#)?;
+        serde_json::to_writer(writer, &joined.unread_notifications)?;
+        writer.write_all(b",")?;
+
+        write!(
+            writer,
+            r#""timeline":{{"limited":{},"prev_batch":"{}","events":["#,
+            joined.timeline.limited, &joined.timeline.prev_batch
+        )?;
+        let mut sub_is_first = true;
+        for e in &joined.timeline.events {
+            if !sub_is_first {
+                writer.write_all(b",")?;
+            } else {
+                sub_is_first = false;
+            }
+            writer.write_all(e.value.as_bytes())?;
+        }
+        writer.write_all(b"]},")?;
+
+        write!(
+            writer,
+            r#""state":{{"events":["#,
+        )?;
+        let mut sub_is_first = true;
+        for e in &joined.state.events {
+            if !sub_is_first {
+                writer.write_all(b",")?;
+            } else {
+                sub_is_first = false;
+            }
+            writer.write_all(e.value.as_bytes())?;
+        }
+        writer.write_all(b"]}")?;
+
+        writer.write_all(b"}")?;
+    }
+
+    writer.write_all(b"}}}")?;
+
+    Ok(())
+}
+
 fn sync(mut req: Request, mut res: Response) {
     let client = Client::new();
 
@@ -503,7 +569,7 @@ fn sync(mut req: Request, mut res: Response) {
 
     println!("Got request: {}", request_path);
 
-    let base_url = Url::parse("https://jki.re").unwrap();
+    let base_url = Url::parse("http://jki.re").unwrap();
     let new_url = base_url.join(&request_path).unwrap();
 
     let query_pairs: BTreeMap<_,_> = new_url.query_pairs().collect();
@@ -552,12 +618,24 @@ fn sync(mut req: Request, mut res: Response) {
     res.headers_mut().set_raw("Access-Control-Allow-Headers", vec![b"Origin, X-Requested-With, Content-Type, Accept".to_vec()]);
     res.headers_mut().set_raw("Access-Control-Allow-Origin", vec![b"*".to_vec()]);
     res.headers_mut().set_raw("Access-Control-Allow-Methods", vec![b"GET, POST, PUT, DELETE, OPTIONS".to_vec()]);
+    res.headers_mut().set_raw("Content-Type", vec![b"application/json".to_vec()]);
 
+    let start_gen = time::now();
     let json_resp = generate_sync_response(&mut conn, &user_id, filter).unwrap();
+    let end_gen = time::now();
 
     let mut stream = res.start().unwrap();
-    serde_json::to_writer(&mut stream, &json_resp).unwrap();
+    // serde_json::to_writer(&mut stream, &json_resp).unwrap();
+    write_sync_response(&mut stream, json_resp).unwrap();
     stream.end();
+
+    let end_stream = time::now();
+
+    println!(
+        "Finished sync: {}ms, {}ms",
+        (end_gen - start_gen).num_milliseconds(),
+        (end_stream - end_gen).num_milliseconds(),
+    );
 }
 
 use hyper::net::Openssl;
@@ -568,4 +646,5 @@ fn main() {
         "/home/erikj/git/synapse/demo/etc/localhost:8480.tls.key",
     ).unwrap();
     Server::https("0.0.0.0:12345", ssl).unwrap().handle(sync).unwrap();
+    // Server::http("0.0.0.0:12345").unwrap().handle(sync).unwrap();
 }

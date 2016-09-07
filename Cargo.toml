@@ -11,8 +11,9 @@ scoped-pool = "1.0.0"
 serde = "0.8.4"
 serde_json = "0.8.1"
 serde_macros = "0.8.4"
+time = "0.1.35"
 
 [dependencies.indolentjson]
-git = "https://github.com/erikjohnston/indolentjson-rust.git"
 branch = "erikj/node"
+git = "https://github.com/erikjohnston/indolentjson-rust.git"
 optional = false

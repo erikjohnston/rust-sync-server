@@ -9,16 +9,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+use indolentjson::nodes::Value as IndolentValue;
+
+
+#[derive(Debug, Clone)]
 pub struct Event {
-    #[serde(rename="type")]
-    pub etype: String,
-    pub state_key: Option<String>,
     pub event_id: String,
-    pub sender: String,
-    pub content: serde_json::Value,
-    pub origin_server_ts: u64,
-    pub unsigned: serde_json::Value,
+    pub value: IndolentValue,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -36,7 +33,7 @@ pub struct ReceiptEvent {
 }
 
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct SyncResponse {
     pub next_batch: String,
     pub rooms: RoomSyncResponse,
@@ -44,14 +41,14 @@ pub struct SyncResponse {
     pub presence: Presence,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct RoomSyncResponse {
     pub join: BTreeMap<String, JoinedSyncResponse>,
     pub invite: BTreeMap<String, String>,
     pub leave: BTreeMap<String, String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct JoinedSyncResponse {
     pub timeline: TimelineBatch,
     pub state: StateBatch,
@@ -60,7 +57,7 @@ pub struct JoinedSyncResponse {
     pub unread_notifications: UnreadNotification,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct StateBatch {
     pub events: Vec<Event>,
 }
@@ -81,7 +78,7 @@ pub struct Presence {
 }
 
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct TimelineBatch {
     pub events: Vec<Event>,
     pub prev_batch: String,
