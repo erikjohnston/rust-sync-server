@@ -635,7 +635,7 @@ fn sync(mut req: Request, mut res: Response) {
     let ref access_token = query_pairs["access_token"];
 
     let mut conn = Connection::connect(
-        "postgresql://erikj:foxmoose@%2Fvar%2Frun%2Fpostgresql/synapse",
+        "postgresql://%2Fvar%2Frun%2Fpostgresql/synapse",
         TlsMode::None,
     ).unwrap();
 
