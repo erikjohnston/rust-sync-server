@@ -65,10 +65,10 @@ fn get_account_data_for_user<T: GenericConnection>(conn: &mut T, user_id: &str)
     let mut by_room = BTreeMap::new();
     let room_sql = "SELECT room_id, account_data_type, content FROM room_account_data WHERE user_id = $1";
     for row in &conn.query(room_sql, &[&user_id])? {
-        let bytes: Vec<u8> = row.get(2);
+        let bytes: String = row.get(2);
         by_room.entry(row.get(0)).or_insert_with(Vec::new).push(AccountDataEvent {
             etype: row.get(1),
-            content: serde_json::from_slice(&bytes[..])?,
+            content: serde_json::from_str(&bytes[..])?,
         });
     }
 
@@ -635,7 +635,7 @@ fn sync(mut req: Request, mut res: Response) {
     let ref access_token = query_pairs["access_token"];
 
     let mut conn = Connection::connect(
-        "postgresql://%2Fvar%2Frun%2Fpostgresql/synapse",
+        "postgresql://erikj@%2Fvar%2Frun%2Fpostgresql/sytest1",
         TlsMode::None,
     ).unwrap();
 
