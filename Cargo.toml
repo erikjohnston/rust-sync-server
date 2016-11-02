@@ -5,12 +5,12 @@ version = "0.1.0"
 
 [dependencies]
 hyper = "0.9.10"
-postgres = "0.11.10"
+postgres = "0.12.0"
 quick-error = "1.1.0"
 scoped-pool = "1.0.0"
 serde = "0.8.4"
 serde_json = "0.8.1"
-serde_macros = "0.8.4"
+serde_derive = "0.8.4"
 time = "0.1.35"
 
 [dependencies.indolentjson]

@@ -1,9 +1,10 @@
-#![feature(custom_derive, plugin, question_mark)]
-#![plugin(serde_macros)]
+#![feature(proc_macro)]
 
 extern crate hyper;
 extern crate serde;
 extern crate serde_json;
+#[macro_use]
+extern crate serde_derive;
 extern crate postgres;
 #[macro_use]
 extern crate quick_error;
@@ -16,7 +17,7 @@ mod types;
 
 use types::*;
 
-use postgres::{Connection, GenericConnection, SslMode};
+use postgres::{Connection, GenericConnection, TlsMode};
 use postgres::error::Error as PostgresError;
 use postgres::types::ToSql;
 
@@ -216,18 +217,36 @@ fn get_state_ids_for_event<T: GenericConnection>(
 ) -> Result<Vec<String>, DatabaseError> {
     let query = if let Some(ref type_list) = filter.room.state.types {
         conn.query(r#"
-            SELECT s.event_id
-            FROM event_to_state_groups AS e
-            INNER JOIN state_groups_state AS s USING (state_group)
-            WHERE e.event_id = $1
+            WITH RECURSIVE state(state_group) AS (
+                SELECT state_group FROM event_to_state_groups WHERE event_id = $1
+                UNION ALL
+                SELECT prev_state_group FROM state_group_edges e, state s
+                WHERE s.state_group = e.state_group
+            )
+            SELECT DISTINCT last_value(event_id) OVER (
+                PARTITION BY type, state_key ORDER BY state_group ASC
+                ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+            ) AS event_id FROM state_groups_state
+            WHERE state_group IN (
+                SELECT state_group FROM state
+            )
             AND type = ANY($2)
         "#, &[&event_id, type_list])?
     } else {
         conn.query(r#"
-            SELECT s.event_id
-            FROM event_to_state_groups AS e
-            INNER JOIN state_groups_state AS s USING (state_group)
-            WHERE e.event_id = $1
+            WITH RECURSIVE state(state_group) AS (
+                SELECT state_group FROM event_to_state_groups WHERE event_id = $1
+                UNION ALL
+                SELECT prev_state_group FROM state_group_edges e, state s
+                WHERE s.state_group = e.state_group
+            )
+            SELECT DISTINCT last_value(event_id) OVER (
+                PARTITION BY type, state_key ORDER BY state_group ASC
+                ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+            ) AS event_id FROM state_groups_state
+            WHERE state_group IN (
+                SELECT state_group FROM state
+            )
         "#, &[&event_id])?
     };
 
@@ -244,23 +263,43 @@ fn get_state_for_room<T: GenericConnection>(
 ) -> Result<Vec<String>, DatabaseError> {
     let query = if let Some(ref type_list) = filter.room.state.types {
         conn.query(r#"
-            SELECT s.event_id FROM event_to_state_groups AS e
-            INNER JOIN state_groups_state AS s USING (state_group)
-            WHERE e.event_id IN (
-                SELECT event_id FROM events WHERE stream_ordering::bigint <= $1 AND room_id = $2
-                ORDER BY stream_ordering DESC
-                LIMIT 1
+            WITH RECURSIVE state(state_group) AS (
+                (
+                    SELECT event_id FROM events WHERE stream_ordering <= $1 AND room_id = $2
+                    ORDER BY stream_ordering DESC
+                    LIMIT 1
+                )
+                UNION ALL
+                SELECT prev_state_group FROM state_group_edges e, state s
+                WHERE s.state_group = e.state_group
+            )
+            SELECT DISTINCT last_value(event_id) OVER (
+                PARTITION BY type, state_key ORDER BY state_group ASC
+                ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+            ) AS event_id FROM state_groups_state
+            WHERE state_group IN (
+                SELECT state_group FROM state
             )
             AND type = ANY($3)
         "#, &[&stream_ordering, &room_id, &type_list])?
     } else {
         conn.query(r#"
-            SELECT s.event_id FROM event_to_state_groups AS e
-            INNER JOIN state_groups_state AS s USING (state_group)
-            WHERE e.event_id IN (
-                SELECT event_id FROM events WHERE stream_ordering::bigint <= $1 AND room_id = $2
-                ORDER BY stream_ordering DESC
-                LIMIT 1
+            WITH RECURSIVE state(state_group) AS (
+                (
+                    SELECT event_id FROM events WHERE stream_ordering <= $1 AND room_id = $2
+                    ORDER BY stream_ordering DESC
+                    LIMIT 1
+                )
+                UNION ALL
+                SELECT prev_state_group FROM state_group_edges e, state s
+                WHERE s.state_group = e.state_group
+            )
+            SELECT DISTINCT last_value(event_id) OVER (
+                PARTITION BY type, state_key ORDER BY state_group ASC
+                ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+            ) AS event_id FROM state_groups_state
+            WHERE state_group IN (
+                SELECT state_group FROM state
             )
         "#, &[&stream_ordering, &room_id])?
     };
@@ -401,7 +440,7 @@ fn generate_sync_response<T: GenericConnection>(
 
     let mut joined_responses = BTreeMap::new();
 
-    let (global_account_data, mut account_data_by_room) = get_account_data_for_user(conn, user_id)?;
+    let (_global_account_data, mut account_data_by_room) = get_account_data_for_user(conn, user_id)?;
 
     println!("Got account data");
 
@@ -474,7 +513,7 @@ use hyper::Url;
 use hyper::server::{Server, Request, Response};
 use hyper::Client;
 use hyper::status::StatusCode;
-use hyper::header::ContentType;
+
 use std::io;
 
 fn write_sync_response<W: io::Write>(writer: &mut W, sync: SyncResponse) -> serde_json::Result<()> {
@@ -587,8 +626,8 @@ fn sync(mut req: Request, mut res: Response) {
         *res.status_mut() = proxy_response.status.clone();
         *res.headers_mut() = proxy_response.headers.clone();
         let mut stream = res.start().unwrap();
-        io::copy(&mut proxy_response, &mut stream);
-        stream.end();
+        io::copy(&mut proxy_response, &mut stream).unwrap();
+        stream.end().unwrap();
 
         return;
     }
@@ -596,8 +635,8 @@ fn sync(mut req: Request, mut res: Response) {
     let ref access_token = query_pairs["access_token"];
 
     let mut conn = Connection::connect(
-        "postgresql://erikj:foxmoose@localhost/synapse",
-        SslMode::None,
+        "postgresql://erikj:foxmoose@%2Fvar%2Frun%2Fpostgresql/synapse",
+        TlsMode::None,
     ).unwrap();
 
     let user_id = get_user_by_access_token(&mut conn, access_token).unwrap().unwrap();
@@ -627,7 +666,7 @@ fn sync(mut req: Request, mut res: Response) {
     let mut stream = res.start().unwrap();
     // serde_json::to_writer(&mut stream, &json_resp).unwrap();
     write_sync_response(&mut stream, json_resp).unwrap();
-    stream.end();
+    stream.end().unwrap();
 
     let end_stream = time::now();
 
@@ -641,10 +680,10 @@ fn sync(mut req: Request, mut res: Response) {
 use hyper::net::Openssl;
 
 fn main() {
-    let ssl = Openssl::with_cert_and_key(
-        "/home/erikj/git/synapse/demo/etc/localhost:8480.tls.crt",
-        "/home/erikj/git/synapse/demo/etc/localhost:8480.tls.key",
-    ).unwrap();
-    Server::https("0.0.0.0:12345", ssl).unwrap().handle(sync).unwrap();
-    // Server::http("0.0.0.0:12345").unwrap().handle(sync).unwrap();
+    // let ssl = Openssl::with_cert_and_key(
+    //     "/home/erikj/git/synapse/demo/etc/localhost:8480.tls.crt",
+    //     "/home/erikj/git/synapse/demo/etc/localhost:8480.tls.key",
+    // ).unwrap();
+    // Server::https("0.0.0.0:12345", ssl).unwrap().handle(sync).unwrap();
+    Server::http("0.0.0.0:12345").unwrap().handle(sync).unwrap();
 }
